@@ -11,7 +11,9 @@ var fastFile = require('fastfile');
 var circom_runtime = require('circom_runtime');
 var r1csfile = require('r1csfile');
 var ejs = require('ejs');
+require('bfj');
 var jsSha3 = require('js-sha3');
+require('fs');
 
 function _interopDefaultLegacy (e) { return e && typeof e === 'object' && 'default' in e ? e : { 'default': e }; }
 
@@ -95,22 +97,6 @@ async function getCurveFromName(name) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
-
-const _revTable = [];
-for (let i=0; i<256; i++) {
-    _revTable[i] = _revSlow(i, 8);
-}
-
-function _revSlow(idx, bits) {
-    let res =0;
-    let a = idx;
-    for (let i=0; i<bits; i++) {
-        res <<= 1;
-        res = res | (a &1);
-        a >>=1;
-    }
-    return res;
-}
 
 
 function log2( V )
@@ -240,6 +226,50 @@ function byteArray2hex(byteArray) {
     }).join("");
 }
 
+function stringifyBigIntsWithField(Fr, o) {
+    if (o instanceof Uint8Array)  {
+        return Fr.toString(o);
+    } else if (Array.isArray(o)) {
+        return o.map(stringifyBigIntsWithField.bind(null, Fr));
+    } else if (typeof o == "object") {
+        const res = {};
+        const keys = Object.keys(o);
+        keys.forEach( (k) => {
+            res[k] = stringifyBigIntsWithField(Fr, o[k]);
+        });
+        return res;
+    } else if ((typeof(o) == "bigint") || o.eq !== undefined)  {
+        return o.toString(10);
+    } else {
+        return o;
+    }
+}
+
+const GROTH16_PROTOCOL_ID = 1;
+const PLONK_PROTOCOL_ID = 2;
+const FFLONK_PROTOCOL_ID = 10;
+
+/*
+    Copyright 2022 iden3 association.
+
+    This file is part of snarkjs.
+
+    snarkjs is a free software: you can redistribute it and/or
+    modify it under the terms of the GNU General Public License as published by the
+    Free Software Foundation, either version 3 of the License, or (at your option)
+    any later version.
+
+    snarkjs is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+    more details.
+
+    You should have received a copy of the GNU General Public License along with
+    snarkjs. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+const ZKEY_FF_HEADER_SECTION = 2;
+
 /*
     Copyright 2018 0KIMS association.
 
@@ -330,13 +360,15 @@ async function readHeader$1(fd, sections, toObject) {
     const protocolId = await fd.readULE32();
     await binFileUtils__namespace.endReadSection(fd);
 
-    if (protocolId == 1) {
+    if (protocolId === GROTH16_PROTOCOL_ID) {
         return await readHeaderGroth16(fd, sections, toObject);
-    } else if (protocolId == 2) {
-        return await readHeaderPlonk(fd, sections);
+    } else if (protocolId === PLONK_PROTOCOL_ID) {
+        return await readHeaderPlonk(fd, sections, toObject);
+    } else if (protocolId === FFLONK_PROTOCOL_ID) {
+        return await readHeaderFFlonk(fd, sections, toObject);
     } else {
         throw new Error("Protocol not supported: ");
-    }        
+    }
 }
 
 
@@ -357,29 +389,24 @@ async function readHeaderGroth16(fd, sections, toObject) {
     const n8r = await fd.readULE32();
     zkey.n8r = n8r;
     zkey.r = await binFileUtils__namespace.readBigInt(fd, n8r);
-
-    let curve = await getCurveFromQ(zkey.q);
-
+    zkey.curve = await getCurveFromQ(zkey.q);
     zkey.nVars = await fd.readULE32();
     zkey.nPublic = await fd.readULE32();
     zkey.domainSize = await fd.readULE32();
     zkey.power = log2(zkey.domainSize);
-    zkey.vk_alpha_1 = await readG1(fd, curve, toObject);
-    zkey.vk_beta_1 = await readG1(fd, curve, toObject);
-    zkey.vk_beta_2 = await readG2(fd, curve, toObject);
-    zkey.vk_gamma_2 = await readG2(fd, curve, toObject);
-    zkey.vk_delta_1 = await readG1(fd, curve, toObject);
-    zkey.vk_delta_2 = await readG2(fd, curve, toObject);
+    zkey.vk_alpha_1 = await readG1(fd, zkey.curve, toObject);
+    zkey.vk_beta_1 = await readG1(fd, zkey.curve, toObject);
+    zkey.vk_beta_2 = await readG2(fd, zkey.curve, toObject);
+    zkey.vk_gamma_2 = await readG2(fd, zkey.curve, toObject);
+    zkey.vk_delta_1 = await readG1(fd, zkey.curve, toObject);
+    zkey.vk_delta_2 = await readG2(fd, zkey.curve, toObject);
     await binFileUtils__namespace.endReadSection(fd);
 
     return zkey;
 
 }
 
-
-
-
-async function readHeaderPlonk(fd, sections, protocol, toObject) {
+async function readHeaderPlonk(fd, sections, toObject) {
     const zkey = {};
 
     zkey.protocol = "plonk";
@@ -394,9 +421,7 @@ async function readHeaderPlonk(fd, sections, protocol, toObject) {
     const n8r = await fd.readULE32();
     zkey.n8r = n8r;
     zkey.r = await binFileUtils__namespace.readBigInt(fd, n8r);
-
-    let curve = await getCurveFromQ(zkey.q);
-
+    zkey.curve = await getCurveFromQ(zkey.q);
     zkey.nVars = await fd.readULE32();
     zkey.nPublic = await fd.readULE32();
     zkey.domainSize = await fd.readULE32();
@@ -406,15 +431,55 @@ async function readHeaderPlonk(fd, sections, protocol, toObject) {
     zkey.k1 = await fd.read(n8r);
     zkey.k2 = await fd.read(n8r);
 
-    zkey.Qm = await readG1(fd, curve, toObject);
-    zkey.Ql = await readG1(fd, curve, toObject);
-    zkey.Qr = await readG1(fd, curve, toObject);
-    zkey.Qo = await readG1(fd, curve, toObject);
-    zkey.Qc = await readG1(fd, curve, toObject);
-    zkey.S1 = await readG1(fd, curve, toObject);
-    zkey.S2 = await readG1(fd, curve, toObject);
-    zkey.S3 = await readG1(fd, curve, toObject);
-    zkey.X_2 = await readG2(fd, curve, toObject);
+    zkey.Qm = await readG1(fd, zkey.curve, toObject);
+    zkey.Ql = await readG1(fd, zkey.curve, toObject);
+    zkey.Qr = await readG1(fd, zkey.curve, toObject);
+    zkey.Qo = await readG1(fd, zkey.curve, toObject);
+    zkey.Qc = await readG1(fd, zkey.curve, toObject);
+    zkey.S1 = await readG1(fd, zkey.curve, toObject);
+    zkey.S2 = await readG1(fd, zkey.curve, toObject);
+    zkey.S3 = await readG1(fd, zkey.curve, toObject);
+    zkey.X_2 = await readG2(fd, zkey.curve, toObject);
+
+    await binFileUtils__namespace.endReadSection(fd);
+
+    return zkey;
+}
+
+async function readHeaderFFlonk(fd, sections, toObject) {
+    const zkey = {};
+
+    zkey.protocol = "fflonk";
+    zkey.protocolId = FFLONK_PROTOCOL_ID;
+
+    await binFileUtils__namespace.startReadUniqueSection(fd, sections, ZKEY_FF_HEADER_SECTION);
+    const n8q = await fd.readULE32();
+    zkey.n8q = n8q;
+    zkey.q = await binFileUtils__namespace.readBigInt(fd, n8q);
+    zkey.curve = await getCurveFromQ(zkey.q);
+
+    const n8r = await fd.readULE32();
+    zkey.n8r = n8r;
+    zkey.r = await binFileUtils__namespace.readBigInt(fd, n8r);
+
+    zkey.nVars = await fd.readULE32();
+    zkey.nPublic = await fd.readULE32();
+    zkey.domainSize = await fd.readULE32();
+    zkey.power = log2(zkey.domainSize);
+    zkey.nAdditions = await fd.readULE32();
+    zkey.nConstraints = await fd.readULE32();
+
+    zkey.k1 = await fd.read(n8r);
+    zkey.k2 = await fd.read(n8r);
+
+    zkey.w3 = await fd.read(n8r);
+    zkey.w4 = await fd.read(n8r);
+    zkey.w8 = await fd.read(n8r);
+    zkey.wr = await fd.read(n8r);
+
+    zkey.X_2 = await readG2(fd, zkey.curve, toObject);
+
+    zkey.C0 = await readG1(fd, zkey.curve, toObject);
 
     await binFileUtils__namespace.endReadSection(fd);
 
@@ -424,7 +489,7 @@ async function readHeaderPlonk(fd, sections, protocol, toObject) {
 async function readZKey(fileName, toObject) {
     const {fd, sections} = await binFileUtils__namespace.readBinFile(fileName, "zkey", 1);
 
-    const zkey = await readHeader$1(fd, sections, "groth16");
+    const zkey = await readHeader$1(fd, sections, toObject);
 
     const Fr = new ffjavascript.F1Field(zkey.r);
     const Rr = ffjavascript.Scalar.mod(ffjavascript.Scalar.shl(1, zkey.n8r*8), zkey.r);
@@ -775,7 +840,7 @@ async function groth16Prove(zkeyFileName, witnessFileName, logger) {
         throw new Error(`Invalid witness length. Circuit: ${zkey.nVars}, witness: ${wtns.nWitness}`);
     }
 
-    const curve = await getCurveFromQ(zkey.q);
+    const curve = zkey.curve;
     const Fr = curve.Fr;
     const G1 = curve.G1;
     const G2 = curve.G2;
@@ -1120,8 +1185,10 @@ async function joinABC(curve, zkey, a, b, c, logger) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const { unstringifyBigInts: unstringifyBigInts$8} = ffjavascript.utils;
 
-async function wtnsCalculate(input, wasmFileName, wtnsFileName, options) {
+async function wtnsCalculate(_input, wasmFileName, wtnsFileName, options) {
+    const input = unstringifyBigInts$8(_input);
 
     const fdWasm = await fastFile__namespace.readExisting(wasmFileName);
     const wasm = await fdWasm.read(fdWasm.totalSize);
@@ -1163,8 +1230,11 @@ async function wtnsCalculate(input, wasmFileName, wtnsFileName, options) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const {unstringifyBigInts: unstringifyBigInts$7} = ffjavascript.utils;
 
-async function groth16FullProve(input, wasmFile, zkeyFileName, logger) {
+async function groth16FullProve(_input, wasmFile, zkeyFileName, logger) {
+    const input = unstringifyBigInts$7(_input);
+
     const wtns= {
         type: "mem"
     };
@@ -1190,9 +1260,9 @@ async function groth16FullProve(input, wasmFile, zkeyFileName, logger) {
     You should have received a copy of the GNU General Public License along with
     snarkjs. If not, see <https://www.gnu.org/licenses/>.
 */
-const {unstringifyBigInts: unstringifyBigInts$1} = ffjavascript.utils;
+const {unstringifyBigInts: unstringifyBigInts$6} = ffjavascript.utils;
 
-async function groth16Verify(vk_verifier, publicSignals, proof, logger) {
+async function groth16Verify(_vk_verifier, _publicSignals, _proof, logger) {
 /*
     let cpub = vk_verifier.IC[0];
     for (let s= 0; s< vk_verifier.nPublic; s++) {
@@ -1200,9 +1270,9 @@ async function groth16Verify(vk_verifier, publicSignals, proof, logger) {
     }
 */
 
-    vk_verifier = unstringifyBigInts$1(vk_verifier);
-    proof = unstringifyBigInts$1(proof);
-    publicSignals = unstringifyBigInts$1(publicSignals);
+    const vk_verifier = unstringifyBigInts$6(_vk_verifier);
+    const proof = unstringifyBigInts$6(_proof);
+    const publicSignals = unstringifyBigInts$6(_publicSignals);
 
     const curve = await getCurveFromName(vk_verifier.curve);
 
@@ -1263,6 +1333,7 @@ async function groth16Verify(vk_verifier, publicSignals, proof, logger) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const { unstringifyBigInts: unstringifyBigInts$5} = ffjavascript.utils;
 
 function p256$1(n) {
     let nstr = n.toString(16);
@@ -1271,7 +1342,9 @@ function p256$1(n) {
     return nstr;
 }
 
-async function groth16ExportSolidityCallData(proof, pub) {
+async function groth16ExportSolidityCallData(_proof, _pub) {
+    const proof = unstringifyBigInts$5(_proof);
+    const pub = unstringifyBigInts$5(_pub);
 
     let inputs = "";
     for (let i=0; i<pub.length; i++) {
@@ -1721,7 +1794,9 @@ function calculateFirstChallengeHash(curve, power, logger) {
     return hasher.digest();
 
     function hashBlock(buff, n) {
-        const blockSize = 500000;
+        // this block size is a good compromise between speed and the maximum
+        // input size of the Blake2b update method (65,535,720 bytes).
+        const blockSize = 341000;
         const nBlocks = Math.floor(n / blockSize);
         const rem = n % blockSize;
         const bigBuff = new Uint8Array(blockSize * buff.byteLength);
@@ -3544,7 +3619,7 @@ async function exportJson(pTauFilename, verbose) {
 
     await fd.close();
 
-    return pTau;
+    return stringifyBigIntsWithField(curve.Fr, pTau);
 
 
 
@@ -3580,7 +3655,7 @@ async function exportJson(pTauFilename, verbose) {
                 res[p].push(G.fromRprLEM(buff, 0));
             }
         }
-        await binFileUtils__namespace.endReadSection(fd);
+        await binFileUtils__namespace.endReadSection(fd, true);
         return res;
     }
 
@@ -3650,7 +3725,7 @@ function r1csPrint(r1cs, syms, logger) {
             const keys = Object.keys(lc);
             keys.forEach( (k) => {
                 let name = syms.varIdx2Name[k];
-                if (name == "one") name = "";
+                if (name == "one") name = "1";
 
                 let vs = r1cs.curve.Fr.toString(lc[k]);
                 if (vs == "1") vs = "";  // Do not show ones
@@ -3729,33 +3804,15 @@ async function r1csInfo(r1csName, logger) {
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
 
-function stringifyBigInts$2(Fr, o) {
-    if (o instanceof Uint8Array)  {
-        return Fr.toString(o);
-    } else if (Array.isArray(o)) {
-        return o.map(stringifyBigInts$2.bind(null, Fr));
-    } else if (typeof o == "object") {
-        const res = {};
-        const keys = Object.keys(o);
-        keys.forEach( (k) => {
-            res[k] = stringifyBigInts$2(Fr, o[k]);
-        });
-        return res;
-    } else if ((typeof(o) == "bigint") || o.eq !== undefined)  {
-        return o.toString(10);
-    } else {
-        return o;
-    }
-}
-
 
 async function r1csExportJson(r1csFileName, logger) {
 
     const cir = await r1csfile.readR1cs(r1csFileName, true, true, true, logger);
     const Fr=cir.curve.Fr;
     delete cir.curve;
+    delete cir.F;
 
-    return stringifyBigInts$2(Fr, cir);
+    return stringifyBigIntsWithField(Fr, cir);
 }
 
 /*
@@ -3856,8 +3913,12 @@ async function loadSymbols(symFileName) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const {unstringifyBigInts: unstringifyBigInts$4} = ffjavascript.utils;
 
-async function wtnsDebug(input, wasmFileName, wtnsFileName, symName, options, logger) {
+
+async function wtnsDebug(_input, wasmFileName, wtnsFileName, symName, options, logger) {
+
+    const input = unstringifyBigInts$4(_input);
 
     const fdWasm = await fastFile__namespace.readExisting(wasmFileName);
     const wasm = await fdWasm.read(fdWasm.totalSize);
@@ -3871,13 +3932,15 @@ async function wtnsDebug(input, wasmFileName, wtnsFileName, symName, options, lo
     if (options.set) {
         if (!sym) sym = await loadSymbols(symName);
         wcOps.logSetSignal= function(labelIdx, value) {
-            if (logger) logger.info("SET " + sym.labelIdx2Name[labelIdx] + " <-- " + value.toString());
+            // The line below splits the arrow log into 2 strings to avoid some Secure ECMAScript issues
+            if (logger) logger.info("SET " + sym.labelIdx2Name[labelIdx] + " <" + "-- " + value.toString());
         };
     }
     if (options.get) {
         if (!sym) sym = await loadSymbols(symName);
         wcOps.logGetSignal= function(varIdx, value) {
-            if (logger) logger.info("GET " + sym.labelIdx2Name[varIdx] + " --> " + value.toString());
+            // The line below splits the arrow log into 2 strings to avoid some Secure ECMAScript issues
+            if (logger) logger.info("GET " + sym.labelIdx2Name[varIdx] + " --" + "> " + value.toString());
         };
     }
     if (options.trigger) {
@@ -5642,8 +5705,10 @@ async function beacon(zkeyNameOld, zkeyNameNew, name, beaconHashStr, numIteratio
 async function zkeyExportJson(zkeyFileName) {
 
     const zKey = await readZKey(zkeyFileName, true);
+    delete zKey.curve;
+    delete zKey.F;
 
-    return zKey;
+    return ffjavascript.utils.stringifyBigInts(zKey);
 }
 
 /*
@@ -5840,23 +5905,31 @@ async function bellmanContribute(curve, challengeFilename, responesFileName, ent
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
-const {stringifyBigInts: stringifyBigInts$1} = ffjavascript.utils;
 
-async function zkeyExportVerificationKey(zkeyName, /* logger */ ) {
+const {stringifyBigInts: stringifyBigInts$2} = ffjavascript.utils;
+
+async function zkeyExportVerificationKey(zkeyName, logger) {
+    if (logger) logger.info("EXPORT VERIFICATION KEY STARTED");
 
     const {fd, sections} = await binFileUtils__namespace.readBinFile(zkeyName, "zkey", 2);
     const zkey = await readHeader$1(fd, sections);
 
+    if (logger) logger.info("> Detected protocol: " + zkey.protocol);
+
     let res;
-    if (zkey.protocol == "groth16") {
+    if (zkey.protocol === "groth16") {
         res = await groth16Vk(zkey, fd, sections);
-    } else if (zkey.protocol == "plonk") {
+    } else if (zkey.protocol === "plonk") {
         res = await plonkVk(zkey);
+    } else if (zkey.protocolId && zkey.protocolId === FFLONK_PROTOCOL_ID) {
+        res = await exportFFlonkVk(zkey);
     } else {
-        throw new Error("zkey file is not groth16");
+        throw new Error("zkey file protocol unrecognized");
     }
 
     await fd.close();
+
+    if (logger) logger.info("EXPORT VERIFICATION KEY FINISHED");
 
     return res;
 }
@@ -5864,9 +5937,9 @@ async function zkeyExportVerificationKey(zkeyName, /* logger */ ) {
 
 async function groth16Vk(zkey, fd, sections) {
     const curve = await getCurveFromQ(zkey.q);
-    const sG1 = curve.G1.F.n8*2;
+    const sG1 = curve.G1.F.n8 * 2;
 
-    const alphaBeta = await curve.pairing( zkey.vk_alpha_1 , zkey.vk_beta_2 );
+    const alphaBeta = await curve.pairing(zkey.vk_alpha_1, zkey.vk_beta_2);
 
     let vKey = {
         protocol: zkey.protocol,
@@ -5876,8 +5949,8 @@ async function groth16Vk(zkey, fd, sections) {
         vk_alpha_1: curve.G1.toObject(zkey.vk_alpha_1),
 
         vk_beta_2: curve.G2.toObject(zkey.vk_beta_2),
-        vk_gamma_2:  curve.G2.toObject(zkey.vk_gamma_2),
-        vk_delta_2:  curve.G2.toObject(zkey.vk_delta_2),
+        vk_gamma_2: curve.G2.toObject(zkey.vk_gamma_2),
+        vk_delta_2: curve.G2.toObject(zkey.vk_delta_2),
 
         vk_alphabeta_12: curve.Gt.toObject(alphaBeta)
     };
@@ -5886,14 +5959,14 @@ async function groth16Vk(zkey, fd, sections) {
     ///////////
     await binFileUtils__namespace.startReadUniqueSection(fd, sections, 3);
     vKey.IC = [];
-    for (let i=0; i<= zkey.nPublic; i++) {
+    for (let i = 0; i <= zkey.nPublic; i++) {
         const buff = await fd.read(sG1);
         const P = curve.G1.toObject(buff);
         vKey.IC.push(P);
     }
     await binFileUtils__namespace.endReadSection(fd);
 
-    vKey = stringifyBigInts$1(vKey);
+    vKey = stringifyBigInts$2(vKey);
 
     return vKey;
 }
@@ -5925,23 +5998,132 @@ async function plonkVk(zkey) {
         w: curve.Fr.toObject(curve.Fr.w[zkey.power])
     };
 
-    vKey = stringifyBigInts$1(vKey);
+    vKey = stringifyBigInts$2(vKey);
 
     return vKey;
+}
+
+async function exportFFlonkVk(zkey, logger) {
+    const curve = await getCurveFromQ(zkey.q);
+
+    let vKey = {
+        protocol: zkey.protocol,
+        curve: curve.name,
+        nPublic: zkey.nPublic,
+        power: zkey.power,
+
+        k1: curve.Fr.toObject(zkey.k1),
+        k2: curve.Fr.toObject(zkey.k2),
+
+        w: curve.Fr.toObject(curve.Fr.w[zkey.power]),
+        //wW: curve.Fr.toObject(curve.Fr.w[zkey.power + 1]),
+        w3: curve.Fr.toObject(zkey.w3),
+        w4: curve.Fr.toObject(zkey.w4),
+        w8: curve.Fr.toObject(zkey.w8),
+        wr: curve.Fr.toObject(zkey.wr),
+
+        X_2: curve.G2.toObject(zkey.X_2),
+
+        C0: curve.G1.toObject(zkey.C0),
+    };
+
+    return stringifyBigInts$2(vKey);
+}
+
+/*
+    Copyright 2021 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+const {unstringifyBigInts: unstringifyBigInts$3, stringifyBigInts: stringifyBigInts$1} = ffjavascript.utils;
+
+async function fflonkExportSolidityVerifier(vk, templates, logger) {
+    if (logger) logger.info("FFLONK EXPORT SOLIDITY VERIFIER STARTED");
+
+    const curve = await getCurveFromName(vk.curve);
+
+    // Precompute w3_2, w4_2 and w4_3
+    let w3 = fromVkey(vk.w3);
+    vk.w3_2 = toVkey(curve.Fr.square(w3));
+
+    let w4 = fromVkey(vk.w4);
+    vk.w4_2 = toVkey(curve.Fr.square(w4));
+    vk.w4_3 = toVkey(curve.Fr.mul(curve.Fr.square(w4), w4));
+
+    let w8 = fromVkey(vk.w8);
+    let acc = curve.Fr.one;
+
+    for (let i = 1; i < 8; i++) {
+        acc = curve.Fr.mul(acc, w8);
+        vk["w8_" + i] = toVkey(acc);
+    }
+
+    let template = templates[vk.protocol];
+
+    if (logger) logger.info("FFLONK EXPORT SOLIDITY VERIFIER FINISHED");
+
+    return ejs__default["default"].render(template, vk);
+
+    function fromVkey(str) {
+        const val = unstringifyBigInts$3(str);
+        return curve.Fr.fromObject(val);
+    }
+
+    function toVkey(val) {
+        const str = curve.Fr.toObject(val);
+        return stringifyBigInts$1(str);
+    }
+}
+
+/*
+    This file is part of snarkjs.
+
+    snarkjs is a free software: you can redistribute it and/or
+    modify it under the terms of the GNU General Public License as published by the
+    Free Software Foundation, either version 3 of the License, or (at your option)
+    any later version.
+
+    snarkjs is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+    more details.
+
+    You should have received a copy of the GNU General Public License along with
+    snarkjs. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+async function fflonkExportSolidityVerifierCmd(vk, templates, logger) {
+    return fflonkExportSolidityVerifier(vk, templates, logger);
 }
 
 // Not ready yet
 // module.exports.generateVerifier_kimleeoh = generateVerifier_kimleeoh;
 
-
-
 async function exportSolidityVerifier(zKeyName, templates, logger) {
 
-    const verificationKey = await zkeyExportVerificationKey(zKeyName);
+    const verificationKey = await zkeyExportVerificationKey(zKeyName, logger);
+
+    if ("fflonk" === verificationKey.protocol) {
+        return fflonkExportSolidityVerifierCmd(verificationKey, templates, logger);
+    }
 
     let template = templates[verificationKey.protocol];
 
-    return ejs__default["default"].render(template ,  verificationKey);
+    return ejs__default["default"].render(template, verificationKey);
 }
 
 /*
@@ -6000,12 +6182,15 @@ var zkey = /*#__PURE__*/Object.freeze({
 
 async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
 
+    if (globalThis.gc) {globalThis.gc();}
+
     await Blake2b__default["default"].ready();
 
     const {fd: fdPTau, sections: sectionsPTau} = await binFileUtils.readBinFile(ptauName, "ptau", 1, 1<<22, 1<<24);
     const {curve, power} = await readPTauHeader(fdPTau, sectionsPTau);
     const {fd: fdR1cs, sections: sectionsR1cs} = await binFileUtils.readBinFile(r1csName, "r1cs", 1, 1<<22, 1<<24);
-    const r1cs = await r1csfile.readR1csHeader(fdR1cs, sectionsR1cs, false);
+
+    const r1cs = await r1csfile.readR1csFd(fdR1cs, sectionsR1cs, {loadConstraints: true, loadCustomGates: true});
 
     const sG1 = curve.G1.F.n8*2;
     const G1 = curve.G1;
@@ -6014,7 +6199,7 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
     const n8r = curve.Fr.n8;
 
     if (logger) logger.info("Reading r1cs");
-    let sR1cs = await binFileUtils.readSection(fdR1cs, sectionsR1cs, 2);
+    await binFileUtils.readSection(fdR1cs, sectionsR1cs, 2);
 
     const plonkConstraints = new BigArray();
     const plonkAdditions = new BigArray();
@@ -6022,7 +6207,9 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
 
     const nPublic = r1cs.nOutputs + r1cs.nPubInputs;
 
-    await processConstraints();
+    await processConstraints(curve.Fr, r1cs, logger);
+
+    if (globalThis.gc) {globalThis.gc();}
 
     const fdZKey = await binFileUtils.createBinFile(zkeyName, "zkey", 1, 14, 1<<22, 1<<24);
 
@@ -6058,16 +6245,27 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
 
 
     await writeAdditions(3, "Additions");
+    if (globalThis.gc) {globalThis.gc();}
     await writeWitnessMap(4, 0, "Amap");
+    if (globalThis.gc) {globalThis.gc();}
     await writeWitnessMap(5, 1, "Bmap");
+    if (globalThis.gc) {globalThis.gc();}
     await writeWitnessMap(6, 2, "Cmap");
+    if (globalThis.gc) {globalThis.gc();}
     await writeQMap(7, 3, "Qm");
+    if (globalThis.gc) {globalThis.gc();}
     await writeQMap(8, 4, "Ql");
+    if (globalThis.gc) {globalThis.gc();}
     await writeQMap(9, 5, "Qr");
+    if (globalThis.gc) {globalThis.gc();}
     await writeQMap(10, 6, "Qo");
+    if (globalThis.gc) {globalThis.gc();}
     await writeQMap(11, 7, "Qc");
+    if (globalThis.gc) {globalThis.gc();}
     await writeSigma(12, "sigma");
+    if (globalThis.gc) {globalThis.gc();}
     await writeLs(13, "lagrange polynomials");
+    if (globalThis.gc) {globalThis.gc();}
 
     // Write PTau points
     ////////////
@@ -6077,6 +6275,7 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
     await fdPTau.readToBuffer(buffOut, 0, (domainSize+6)*sG1, sectionsPTau[2][0].p);
     await fdZKey.write(buffOut);
     await binFileUtils.endWriteSection(fdZKey);
+    if (globalThis.gc) {globalThis.gc();}
 
 
     await writeHeaders();
@@ -6089,105 +6288,164 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
 
     return ;
 
-    async function processConstraints() {
+    async function processConstraints(Fr, r1cs, logger) {
 
-        let r1csPos = 0;
-
-        function r1cs_readULE32() {
-            const buff = sR1cs.slice(r1csPos, r1csPos+4);
-            r1csPos += 4;
-            const buffV = new DataView(buff.buffer);
-            return buffV.getUint32(0, true);
+        function normalize(linearComb) {
+            const ss = Object.keys(linearComb);
+            for (let i = 0; i < ss.length; i++) {
+                if (linearComb[ss[i]] == 0n) delete linearComb[ss[i]];
+            }
         }
 
-        function r1cs_readCoef() {
-            const res = Fr.fromRprLE(sR1cs.slice(r1csPos, r1csPos+curve.Fr.n8));
-            r1csPos += curve.Fr.n8;
-            return res;
-        }
+        function join(linearComb1, k, linearComb2) {
+            const res = {};
 
-        function r1cs_readCoefs() {
-            const coefs = [];
-            const res = {
-                k: curve.Fr.zero
-            };
-            const nA = r1cs_readULE32();
-            for (let i=0; i<nA; i++) {
-                const s = r1cs_readULE32();
-                const coefp = r1cs_readCoef();
-
-                if (s==0) {
-                    res.k = coefp;
+            for (let s in linearComb1) {
+                if (typeof res[s] == "undefined") {
+                    res[s] = Fr.mul(k, linearComb1[s]);
                 } else {
-                    coefs.push([s, coefp]);
+                    res[s] = Fr.add(res[s], Fr.mul(k, linearComb1[s]));
                 }
             }
 
-            const resCoef = reduceCoef(coefs);
-            res.s = resCoef[0];
-            res.coef = resCoef[1];
+            for (let s in linearComb2) {
+                if (typeof res[s] == "undefined") {
+                    res[s] = linearComb2[s];
+                } else {
+                    res[s] = Fr.add(res[s], linearComb2[s]);
+                }
+            }
+            normalize(res);
             return res;
         }
 
-        function reduceCoef(coefs) {
-            if (coefs.length == 0) {
-                return [0, curve.Fr.zero];
+        function reduceCoefs(linearComb, maxC) {
+            const res = {
+                k: Fr.zero,
+                s: [],
+                coefs: []
+            };
+            const cs = [];
+
+            for (let s in linearComb) {
+                if (s == 0) {
+                    res.k = Fr.add(res.k, linearComb[s]);
+                } else if (linearComb[s] != 0n) {
+                    cs.push([Number(s), linearComb[s]]);
+                }
             }
-            if (coefs.length == 1) {
-                return coefs[0];
+            while (cs.length > maxC) {
+                const c1 = cs.shift();
+                const c2 = cs.shift();
+
+                const sl = c1[0];
+                const sr = c2[0];
+                const so = plonkNVars++;
+                const qm = Fr.zero;
+                const ql = Fr.neg(c1[1]);
+                const qr = Fr.neg(c2[1]);
+                const qo = Fr.one;
+                const qc = Fr.zero;
+
+                plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
+
+                plonkAdditions.push([sl, sr, c1[1], c2[1]]);
+
+                cs.push([so, Fr.one]);
             }
-            const arr1 = coefs.slice(0, coefs.length >> 1);
-            const arr2 = coefs.slice(coefs.length >> 1);
-            const coef1 = reduceCoef(arr1);
-            const coef2 = reduceCoef(arr2);
-
-            const sl = coef1[0];
-            const sr = coef2[0];
-            const so = plonkNVars++;
-            const qm = curve.Fr.zero;
-            const ql = Fr.neg(coef1[1]);
-            const qr = Fr.neg(coef2[1]);
-            const qo = curve.Fr.one;
-            const qc = curve.Fr.zero;
-
-            plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
-
-            plonkAdditions.push([sl, sr, coef1[1], coef2[1]]);
-
-            return [so, curve.Fr.one];
+            for (let i = 0; i < cs.length; i++) {
+                res.s[i] = cs[i][0];
+                res.coefs[i] = cs[i][1];
+            }
+            while (res.coefs.length < maxC) {
+                res.s.push(0);
+                res.coefs.push(Fr.zero);
+            }
+            return res;
         }
 
-        for (let s = 1; s <= nPublic ; s++) {
+        function addConstraintSum(lc) {
+            const C = reduceCoefs(lc, 3);
+            const sl = C.s[0];
+            const sr = C.s[1];
+            const so = C.s[2];
+            const qm = Fr.zero;
+            const ql = C.coefs[0];
+            const qr = C.coefs[1];
+            const qo = C.coefs[2];
+            const qc = C.k;
+            plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
+        }
+
+        function addConstraintMul(lcA, lcB, lcC) {
+            const A = reduceCoefs(lcA, 1);
+            const B = reduceCoefs(lcB, 1);
+            const C = reduceCoefs(lcC, 1);
+
+
+            const sl = A.s[0];
+            const sr = B.s[0];
+            const so = C.s[0];
+            const qm = Fr.mul(A.coefs[0], B.coefs[0]);
+            const ql = Fr.mul(A.coefs[0], B.k);
+            const qr = Fr.mul(A.k, B.coefs[0]);
+            const qo = Fr.neg(C.coefs[0]);
+            const qc = Fr.sub(Fr.mul(A.k, B.k), C.k);
+            plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
+        }
+
+        function getLinearCombinationType(lc) {
+            let k = Fr.zero;
+            let n = 0;
+            const ss = Object.keys(lc);
+            for (let i = 0; i < ss.length; i++) {
+                if (lc[ss[i]] == 0n) {
+                    delete lc[ss[i]];
+                } else if (ss[i] == 0) {
+                    k = Fr.add(k, lc[ss[i]]);
+                } else {
+                    n++;
+                }
+            }
+            if (n > 0) return n.toString();
+            if (k != Fr.zero) return "k";
+            return "0";
+        }
+
+        function process(lcA, lcB, lcC) {
+            const lctA = getLinearCombinationType(lcA);
+            const lctB = getLinearCombinationType(lcB);
+            if ((lctA === "0") || (lctB === "0")) {
+                normalize(lcC);
+                addConstraintSum(lcC);
+            } else if (lctA === "k") {
+                const lcCC = join(lcB, lcA[0], lcC);
+                addConstraintSum(lcCC);
+            } else if (lctB === "k") {
+                const lcCC = join(lcA, lcB[0], lcC);
+                addConstraintSum(lcCC);
+            } else {
+                addConstraintMul(lcA, lcB, lcC);
+            }
+        }
+
+        for (let s = 1; s <= nPublic; s++) {
             const sl = s;
             const sr = 0;
             const so = 0;
-            const qm = curve.Fr.zero;
-            const ql = curve.Fr.one;
-            const qr = curve.Fr.zero;
-            const qo = curve.Fr.zero;
-            const qc = curve.Fr.zero;
+            const qm = Fr.zero;
+            const ql = Fr.one;
+            const qr = Fr.zero;
+            const qo = Fr.zero;
+            const qc = Fr.zero;
 
             plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
         }
 
-        for (let c=0; c<r1cs.nConstraints; c++) {
-            if ((logger)&&(c%10000 == 0)) logger.debug(`processing constraints: ${c}/${r1cs.nConstraints}`);
-            const A = r1cs_readCoefs();
-            const B = r1cs_readCoefs();
-            const C = r1cs_readCoefs();
-
-            const sl = A.s;
-            const sr = B.s;
-            const so = C.s;
-            const qm = curve.Fr.mul(A.coef, B.coef);
-            const ql = curve.Fr.mul(A.coef, B.k);
-            const qr = curve.Fr.mul(A.k, B.coef);
-            const qo = curve.Fr.neg(C.coef);
-            const qc = curve.Fr.sub(curve.Fr.mul(A.k, B.k) , C.k);
-
-            plonkConstraints.push([sl, sr, so, qm, ql, qr, qo, qc]);
+        for (let c = 0; c < r1cs.constraints.length; c++) {
+            if ((logger) && (c % 10000 === 0)) logger.debug(`processing constraints: ${c}/${r1cs.nConstraints}`);
+            process(...r1cs.constraints[c]);
         }
-
     }
 
     async function writeWitnessMap(sectionNum, posConstraint, name) {
@@ -6262,17 +6520,23 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
             if (typeof firstPos[s] !== "undefined") {
                 sigma.set(lastAparence[s], firstPos[s]*n8r);
             } else {
-                throw new Error("Variable not used");
+                // throw new Error("Variable not used");
+                console.log("Variable not used");
             }
             if ((logger)&&(s%1000000 == 0)) logger.debug(`writing ${name} phase2: ${s}/${plonkNVars}`);
         }
+
+        if (globalThis.gc) {globalThis.gc();}
         await binFileUtils.startWriteSection(fdZKey, sectionNum);
         let S1 = sigma.slice(0, domainSize*n8r);
         await writeP4(S1);
+        if (globalThis.gc) {globalThis.gc();}
         let S2 = sigma.slice(domainSize*n8r, domainSize*n8r*2);
         await writeP4(S2);
+        if (globalThis.gc) {globalThis.gc();}
         let S3 = sigma.slice(domainSize*n8r*2, domainSize*n8r*3);
         await writeP4(S3);
+        if (globalThis.gc) {globalThis.gc();}
         await binFileUtils.endWriteSection(fdZKey);
 
         S1 = await Fr.batchFromMontgomery(S1);
@@ -6280,8 +6544,11 @@ async function plonkSetup(r1csName, ptauName, zkeyName, logger) {
         S3 = await Fr.batchFromMontgomery(S3);
 
         vk.S1= await curve.G1.multiExpAffine(LPoints, S1, logger, "multiexp S1");
+        if (globalThis.gc) {globalThis.gc();}
         vk.S2= await curve.G1.multiExpAffine(LPoints, S2, logger, "multiexp S2");
+        if (globalThis.gc) {globalThis.gc();}
         vk.S3= await curve.G1.multiExpAffine(LPoints, S3, logger, "multiexp S3");
+        if (globalThis.gc) {globalThis.gc();}
 
         function buildSigma(s, p) {
             if (typeof lastAparence[s] === "undefined") {
@@ -6414,7 +6681,7 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
 
     const zkey = await readHeader$1(fdZKey, sectionsZKey);
     if (zkey.protocol != "plonk") {
-        throw new Error("zkey file is not groth16");
+        throw new Error("zkey file is not plonk");
     }
 
     if (!ffjavascript.Scalar.eq(zkey.r,  wtns.q)) {
@@ -6425,7 +6692,7 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
         throw new Error(`Invalid witness length. Circuit: ${zkey.nVars}, witness: ${wtns.nWitness}, ${zkey.nAdditions}`);
     }
 
-    const curve = await getCurveFromQ(zkey.q);
+    const curve = zkey.curve;
     const Fr = curve.Fr;
     const G1 = curve.G1;
     const n8r = curve.Fr.n8;
@@ -6580,7 +6847,7 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
 
     async function round1() {
         ch.b = [];
-        for (let i=1; i<=9; i++) {
+        for (let i=1; i<=11; i++) {
             ch.b[i] = curve.Fr.random();
         }
     
@@ -6598,10 +6865,13 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
 
     async function round2() {
 
-        const transcript1 = new Uint8Array(G1.F.n8*2*3);
-        G1.toRprUncompressed(transcript1, 0, proof.A);
-        G1.toRprUncompressed(transcript1, G1.F.n8*2, proof.B);
-        G1.toRprUncompressed(transcript1, G1.F.n8*4, proof.C);
+        const transcript1 = new Uint8Array(zkey.nPublic*n8r + G1.F.n8*2*3);
+        for (let i=0; i<zkey.nPublic; i++) {
+            Fr.toRprBE(transcript1, i*n8r, A.slice((i)*n8r, (i+1)*n8r));
+        }
+        G1.toRprUncompressed(transcript1, zkey.nPublic*n8r + 0, proof.A);
+        G1.toRprUncompressed(transcript1, zkey.nPublic*n8r + G1.F.n8*2, proof.B);
+        G1.toRprUncompressed(transcript1, zkey.nPublic*n8r + G1.F.n8*4, proof.C);
 
         ch.beta = hashToFr(transcript1);
         if (logger) logger.debug("beta: " + Fr.toString(ch.beta));
@@ -6901,11 +7171,43 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
             }
         }
 
-        pol_t = t.slice(0, (zkey.domainSize*3+6)*n8r);
+        pol_t = t.slice(0, (zkey.domainSize * 3 + 6) * n8r);
 
-        proof.T1 = await expTau( t.slice(0, zkey.domainSize*n8r) , "multiexp T1");
-        proof.T2 = await expTau( t.slice(zkey.domainSize*n8r, zkey.domainSize*2*n8r) , "multiexp T2");
-        proof.T3 = await expTau( t.slice(zkey.domainSize*2*n8r, (zkey.domainSize*3+6)*n8r) , "multiexp T3");
+        // t(x) has degree 3n + 5, we are going to split t(x) into three smaller polynomials:
+        // t'_low and t'_mid  with a degree < n and t'_high with a degree n+5
+        // such that t(x) = t'_low(X) + X^n t'_mid(X) + X^{2n} t'_hi(X)
+        // To randomize the parts we use blinding scalars b_10 and b_11 in a way that doesn't change t(X):
+        // t_low(X) = t'_low(X) + b_10 X^n
+        // t_mid(X) = t'_mid(X) - b_10 + b_11 X^n
+        // t_high(X) = t'_high(X) - b_11
+        // such that
+        // t(X) = t_low(X) + X^n t_mid(X) + X^2n t_high(X)
+
+        // compute t_low(X)
+        let polTLow = new ffjavascript.BigBuffer((zkey.domainSize + 1) * n8r);
+        polTLow.set(t.slice(0, zkey.domainSize * n8r), 0);
+        // Add blinding scalar b_10 as a new coefficient n
+        polTLow.set(ch.b[10], zkey.domainSize * n8r);
+
+        // compute t_mid(X)
+        let polTMid = new ffjavascript.BigBuffer((zkey.domainSize + 1) * n8r);
+        polTMid.set(t.slice(zkey.domainSize * n8r, zkey.domainSize * 2 * n8r), 0);
+        // Subtract blinding scalar b_10 to the lowest coefficient of t_mid
+        const lowestMid = Fr.sub(polTMid.slice(0, n8r), ch.b[10]);
+        polTMid.set(lowestMid, 0);
+        // Add blinding scalar b_11 as a new coefficient n
+        polTMid.set(ch.b[11], zkey.domainSize * n8r);
+
+        // compute t_high(X)
+        let polTHigh = new ffjavascript.BigBuffer((zkey.domainSize + 6) * n8r);
+        polTHigh.set(t.slice(zkey.domainSize * 2 * n8r, (zkey.domainSize * 3 + 6) * n8r), 0);
+        //Subtract blinding scalar b_11 to the lowest coefficient of t_high
+        const lowestHigh = Fr.sub(polTHigh.slice(0, n8r), ch.b[11]);
+        polTHigh.set(lowestHigh, 0);
+
+        proof.T1 = await expTau(polTLow, "multiexp T1");
+        proof.T2 = await expTau(polTMid, "multiexp T2");
+        proof.T3 = await expTau(polTHigh, "multiexp T3");
 
         function mul2(a,b, ap, bp,  p) {
             let r, rz;
@@ -7090,28 +7392,47 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
 
         const xi2m = Fr.mul(ch.xim, ch.xim);
 
-        for (let i=0; i<zkey.domainSize+6; i++) {
+        for (let i = 0; i < zkey.domainSize + 6; i++) {
             let w = Fr.zero;
-            w = Fr.add(w, Fr.mul(xi2m,  pol_t.slice( (zkey.domainSize*2+i)*n8r, (zkey.domainSize*2+i+1)*n8r )));
 
-            if (i<zkey.domainSize+3) {
-                w = Fr.add(w, Fr.mul(ch.v[1],  pol_r.slice(i*n8r, (i+1)*n8r)));
+            const polTHigh = pol_t.slice((zkey.domainSize * 2 + i) * n8r, (zkey.domainSize * 2 + i + 1) * n8r);
+            w = Fr.add(w, Fr.mul(xi2m, polTHigh));
+
+            if (i < zkey.domainSize + 3) {
+                w = Fr.add(w, Fr.mul(ch.v[1], pol_r.slice(i * n8r, (i + 1) * n8r)));
             }
 
-            if (i<zkey.domainSize+2) {
-                w = Fr.add(w, Fr.mul(ch.v[2],  pol_a.slice(i*n8r, (i+1)*n8r)));
-                w = Fr.add(w, Fr.mul(ch.v[3],  pol_b.slice(i*n8r, (i+1)*n8r)));
-                w = Fr.add(w, Fr.mul(ch.v[4],  pol_c.slice(i*n8r, (i+1)*n8r)));
-            }
-            
-            if (i<zkey.domainSize) {
-                w = Fr.add(w, pol_t.slice(i*n8r, (i+1)*n8r));
-                w = Fr.add(w, Fr.mul(ch.xim,  pol_t.slice( (zkey.domainSize+i)*n8r, (zkey.domainSize+i+1)*n8r )));
-                w = Fr.add(w, Fr.mul(ch.v[5],  pol_s1.slice(i*n8r, (i+1)*n8r)));
-                w = Fr.add(w, Fr.mul(ch.v[6],  pol_s2.slice(i*n8r, (i+1)*n8r)));
+            if (i < zkey.domainSize + 2) {
+                w = Fr.add(w, Fr.mul(ch.v[2], pol_a.slice(i * n8r, (i + 1) * n8r)));
+                w = Fr.add(w, Fr.mul(ch.v[3], pol_b.slice(i * n8r, (i + 1) * n8r)));
+                w = Fr.add(w, Fr.mul(ch.v[4], pol_c.slice(i * n8r, (i + 1) * n8r)));
             }
 
-            pol_wxi.set(w, i*n8r);
+            if (i < zkey.domainSize) {
+                const polTLow = pol_t.slice(i * n8r, (i + 1) * n8r);
+                w = Fr.add(w, polTLow);
+
+                const polTMid = pol_t.slice((zkey.domainSize + i) * n8r, (zkey.domainSize + i + 1) * n8r);
+                w = Fr.add(w, Fr.mul(ch.xim, polTMid));
+
+                w = Fr.add(w, Fr.mul(ch.v[5], pol_s1.slice(i * n8r, (i + 1) * n8r)));
+                w = Fr.add(w, Fr.mul(ch.v[6], pol_s2.slice(i * n8r, (i + 1) * n8r)));
+            }
+
+            // b_10 and b_11 blinding scalars were applied on round 3 to randomize the polynomials t_low, t_mid, t_high
+            // Subtract blinding scalar b_10 and b_11 to the lowest coefficient
+            if (i === 0) {
+                w = Fr.sub(w, Fr.mul(xi2m, ch.b[11]));
+                w = Fr.sub(w, Fr.mul(ch.xim, ch.b[10]));
+            }
+
+            // Add blinding scalars b_10 and b_11 to the coefficient n
+            if (i === zkey.domainSize) {
+                w = Fr.add(w, ch.b[10]);
+                w = Fr.add(w, Fr.mul(ch.xim, ch.b[11]));
+            }
+
+            pol_wxi.set(w, i * n8r);
         }
 
         let w0 = pol_wxi.slice(0, n8r);
@@ -7245,8 +7566,11 @@ async function plonk16Prove(zkeyFileName, witnessFileName, logger) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const {unstringifyBigInts: unstringifyBigInts$2} = ffjavascript.utils;
 
-async function plonkFullProve(input, wasmFile, zkeyFileName, logger) {
+async function plonkFullProve(_input, wasmFile, zkeyFileName, logger) {
+    const input = unstringifyBigInts$2(_input);
+
     const wtns= {
         type: "mem"
     };
@@ -7272,14 +7596,14 @@ async function plonkFullProve(input, wasmFile, zkeyFileName, logger) {
     You should have received a copy of the GNU General Public License along with
     snarkjs. If not, see <https://www.gnu.org/licenses/>.
 */
-const {unstringifyBigInts} = ffjavascript.utils;
+const {unstringifyBigInts: unstringifyBigInts$1} = ffjavascript.utils;
 const { keccak256 } = jsSha3__default["default"];
 
 
-async function plonkVerify(vk_verifier, publicSignals, proof, logger) {
-    vk_verifier = unstringifyBigInts(vk_verifier);
-    proof = unstringifyBigInts(proof);
-    publicSignals = unstringifyBigInts(publicSignals);
+async function plonkVerify(_vk_verifier, _publicSignals, _proof, logger) {
+    let vk_verifier = unstringifyBigInts$1(_vk_verifier);
+    let proof = unstringifyBigInts$1(_proof);
+    let publicSignals = unstringifyBigInts$1(_publicSignals);
 
     const curve = await getCurveFromName(vk_verifier.curve);
 
@@ -7292,7 +7616,11 @@ async function plonkVerify(vk_verifier, publicSignals, proof, logger) {
         logger.error("Proof is not well constructed");
         return false;
     }
-    const challanges = calculateChallanges(curve, proof);
+    if (publicSignals.length != vk_verifier.nPublic) {
+        logger.error("Invalid number of public inputs");
+        return false;
+    }
+    const challanges = calculateChallanges(curve, proof, publicSignals);
     if (logger) {
         logger.debug("beta: " + Fr.toString(challanges.beta, 16));    
         logger.debug("gamma: " + Fr.toString(challanges.gamma, 16));    
@@ -7412,16 +7740,20 @@ function isWellConstructed(curve, proof) {
     return true;
 }
 
-function calculateChallanges(curve, proof) {
+function calculateChallanges(curve, proof, publicSignals) {
     const G1 = curve.G1;
     const Fr = curve.Fr;
     const n8r = curve.Fr.n8;
     const res = {};
 
-    const transcript1 = new Uint8Array(G1.F.n8*2*3);
-    G1.toRprUncompressed(transcript1, 0, proof.A);
-    G1.toRprUncompressed(transcript1, G1.F.n8*2, proof.B);
-    G1.toRprUncompressed(transcript1, G1.F.n8*4, proof.C);
+    const transcript1 = new Uint8Array(publicSignals.length*n8r + G1.F.n8*2*3);
+    for (let i=0; i<publicSignals.length; i++) {
+        Fr.toRprBE(transcript1, i*n8r, Fr.e(publicSignals[i]));
+    }
+    G1.toRprUncompressed(transcript1, publicSignals.length*n8r + 0, proof.A);
+    G1.toRprUncompressed(transcript1, publicSignals.length*n8r + G1.F.n8*2, proof.B);
+    G1.toRprUncompressed(transcript1, publicSignals.length*n8r + G1.F.n8*4, proof.C);
+
     res.beta = hashToFr(curve, transcript1);
 
     const transcript2 = new Uint8Array(n8r);
@@ -7665,6 +7997,7 @@ async function isValidPairing(curve, proof, challanges, vk, E, F) {
     You should have received a copy of the GNU General Public License
     along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
 */
+const { unstringifyBigInts} = ffjavascript.utils;
 
 function i2hex(i) {
     return ("0" + i.toString(16)).slice(-2);
@@ -7677,7 +8010,9 @@ function p256(n) {
     return nstr;
 }
 
-async function plonkExportSolidityCallData(proof, pub) {
+async function plonkExportSolidityCallData(_proof, _pub) {
+    const proof = unstringifyBigInts(_proof);
+    const pub = unstringifyBigInts(_pub);
 
     const curve = await getCurveFromName(proof.curve);
     const G1 = curve.G1;

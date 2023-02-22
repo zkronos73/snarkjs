@@ -20,6 +20,7 @@
 /* eslint-disable no-console */
 
 import fs from "fs";
+import url from "url";
 
 import {readR1cs} from "r1csfile";
 
@@ -30,21 +31,26 @@ import clProcessor from "./src/clprocessor.js";
 
 import * as powersOfTau from "./src/powersoftau.js";
 
-import {  utils }   from "ffjavascript";
-const {stringifyBigInts, unstringifyBigInts} = utils;
+import {utils} from "ffjavascript";
+
+const {stringifyBigInts} = utils;
 
 import * as zkey from "./src/zkey.js";
 import * as groth16 from "./src/groth16.js";
 import * as plonk from "./src/plonk.js";
+import * as fflonkCmd from "./src/cmds/fflonk_cmds.js";
 import * as wtns from "./src/wtns.js";
 import * as curves from "./src/curves.js";
 import path from "path";
+import bfj from "bfj";
 
 import Logger from "logplease";
-const logger = Logger.create("snarkJS", {showTimestamp:false});
+import * as binFileUtils from "@iden3/binfileutils";
+
+const logger = Logger.create("snarkJS", {showTimestamp: false});
 Logger.setLogLevel("INFO");
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 const commands = [
     {
@@ -295,12 +301,45 @@ const commands = [
         alias: ["pkv"],
         options: "-verbose|v",
         action: plonkVerify
+    },
+    {
+        cmd: "fflonk setup [circuit.r1cs] [powersoftau.ptau] [circuit.zkey]",
+        description: "BETA version. Creates a FFLONK zkey from a circuit",
+        alias: ["ffs"],
+        options: "-verbose|v",
+        action: fflonkSetup
+    },
+    {
+        cmd: "fflonk prove [circuit.zkey] [witness.wtns] [proof.json] [public.json]",
+        description: "BETA version. Generates a FFLONK Proof from witness",
+        alias: ["ffp"],
+        options: "-verbose|v -protocol",
+        action: fflonkProve
+    },
+    {
+        cmd: "fflonk fullprove [witness.json] [circuit.wasm] [circuit.zkey] [proof.json] [public.json]",
+        description: "BETA version. Generates a witness and the FFLONK Proof in the same command",
+        alias: ["fff"],
+        options: "-verbose|v -protocol",
+        action: fflonkFullProve
+    },
+    {
+        cmd: "fflonk verify [verification_key.json] [public.json] [proof.json]",
+        description: "BETA version. Verify a FFLONK Proof",
+        alias: ["ffv"],
+        options: "-verbose|v",
+        action: fflonkVerify
+    },
+    {
+        cmd: "file info [binary.file]",
+        description: "Check info of a binary file",
+        alias: ["fi"],
+        action: fileInfo
     }
 ];
 
 
-
-clProcessor(commands).then( (res) => {
+clProcessor(commands).then((res) => {
     process.exit(res);
 }, (err) => {
     logger.error(err);
@@ -333,17 +372,17 @@ TODO COMMANDS
 
 function changeExt(fileName, newExt) {
     let S = fileName;
-    while ((S.length>0) && (S[S.length-1] != ".")) S = S.slice(0, S.length-1);
-    if (S.length>0) {
+    while ((S.length > 0) && (S[S.length - 1] != ".")) S = S.slice(0, S.length - 1);
+    if (S.length > 0) {
         return S + newExt;
     } else {
-        return fileName+"."+newExt;
+        return fileName + "." + newExt;
     }
 }
 
 // r1cs export circomJSON [circuit.r1cs] [circuit.json]
 async function r1csInfo(params, options) {
-    const r1csName = params[0] ||  "circuit.r1cs";
+    const r1csName = params[0] || "circuit.r1cs";
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
@@ -379,8 +418,7 @@ async function r1csExportJSON(params, options) {
 
     const r1csObj = await r1cs.exportJson(r1csName, logger);
 
-    const S = JSON.stringify(r1csObj, null, 1);
-    await fs.promises.writeFile(jsonName, S);
+    await bfj.write(jsonName, r1csObj, {space: 1});
 
     return 0;
 }
@@ -393,7 +431,7 @@ async function wtnsCalculate(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const input = unstringifyBigInts(JSON.parse(await fs.promises.readFile(inputName, "utf8")));
+    const input = JSON.parse(await fs.promises.readFile(inputName, "utf8"));
 
     await wtns.calculate(input, wasmName, witnessName, {});
 
@@ -411,7 +449,7 @@ async function wtnsDebug(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const input = unstringifyBigInts(JSON.parse(await fs.promises.readFile(inputName, "utf8")));
+    const input = JSON.parse(await fs.promises.readFile(inputName, "utf8"));
 
     await wtns.debug(input, wasmName, witnessName, symName, options, logger);
 
@@ -429,7 +467,7 @@ async function wtnsExportJson(params, options) {
 
     const w = await wtns.exportJson(wtnsName);
 
-    await fs.promises.writeFile(jsonName, JSON.stringify(stringifyBigInts(w), null, 1));
+    await bfj.write(jsonName, stringifyBigInts(w), {space: 1});
 
     return 0;
 }
@@ -451,9 +489,9 @@ async function zksnarkSetup(params, options) {
     const setup = zkSnark[protocol].setup(cir, options.verbose);
 
     await zkey.utils.write(zkeyName, setup.vk_proof);
-    // await fs.promises.writeFile(provingKeyName, JSON.stringify(stringifyBigInts(setup.vk_proof), null, 1), "utf-8");
+    await bfj.write(provingKeyName, stringifyBigInts(setup.vk_proof), { space: 1 });
 
-    await fs.promises.writeFile(verificationKeyName, JSON.stringify(stringifyBigInts(setup.vk_verifier), null, 1), "utf-8");
+    await bfj.write(verificationKeyName, stringifyBigInts(setup.vk_verifier), { space: 1 });
 
     return 0;
 }
@@ -471,8 +509,8 @@ async function groth16Prove(params, options) {
 
     const {proof, publicSignals} = await groth16.prove(zkeyName, witnessName, logger);
 
-    await fs.promises.writeFile(proofName, JSON.stringify(stringifyBigInts(proof), null, 1), "utf-8");
-    await fs.promises.writeFile(publicName, JSON.stringify(stringifyBigInts(publicSignals), null, 1), "utf-8");
+    await bfj.write(proofName, stringifyBigInts(proof), {space: 1});
+    await bfj.write(publicName, stringifyBigInts(publicSignals), {space: 1});
 
     return 0;
 }
@@ -488,12 +526,12 @@ async function groth16FullProve(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const input = unstringifyBigInts(JSON.parse(await fs.promises.readFile(inputName, "utf8")));
+    const input = JSON.parse(await fs.promises.readFile(inputName, "utf8"));
 
-    const {proof, publicSignals} = await groth16.fullProve(input, wasmName, zkeyName,  logger);
+    const {proof, publicSignals} = await groth16.fullProve(input, wasmName, zkeyName, logger);
 
-    await fs.promises.writeFile(proofName, JSON.stringify(stringifyBigInts(proof), null, 1), "utf-8");
-    await fs.promises.writeFile(publicName, JSON.stringify(stringifyBigInts(publicSignals), null, 1), "utf-8");
+    await bfj.write(proofName, stringifyBigInts(proof), {space: 1});
+    await bfj.write(publicName, stringifyBigInts(publicSignals), {space: 1});
 
     return 0;
 }
@@ -505,9 +543,9 @@ async function groth16Verify(params, options) {
     const publicName = params[1] || "public.json";
     const proofName = params[2] || "proof.json";
 
-    const verificationKey = unstringifyBigInts(JSON.parse(fs.readFileSync(verificationKeyName, "utf8")));
-    const pub = unstringifyBigInts(JSON.parse(fs.readFileSync(publicName, "utf8")));
-    const proof = unstringifyBigInts(JSON.parse(fs.readFileSync(proofName, "utf8")));
+    const verificationKey = JSON.parse(fs.readFileSync(verificationKeyName, "utf8"));
+    const pub = JSON.parse(fs.readFileSync(publicName, "utf8"));
+    const proof = JSON.parse(fs.readFileSync(proofName, "utf8"));
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
@@ -522,15 +560,16 @@ async function groth16Verify(params, options) {
 
 // zkey export vkey [circuit_final.zkey] [verification_key.json]",
 async function zkeyExportVKey(params, options) {
-    const zkeyName = params[0] || "circuit_final.zkey";
-    const verificationKeyName = params[1] || "verification_key.json";
+    const zKeyFileName = params[0] || "circuit_final.zkey";
+    const vKeyFilename = params[1] || "circuit_vk.json";
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const vKey = await zkey.exportVerificationKey(zkeyName);
+    const vKey = await zkey.exportVerificationKey(zKeyFileName, logger);
 
-    const S = JSON.stringify(utils.stringifyBigInts(vKey), null, 1);
-    await fs.promises.writeFile(verificationKeyName, S);
+    await bfj.write(vKeyFilename, stringifyBigInts(vKey), {space: 1});
+
+    return 0;
 }
 
 // zkey export json [circuit_final.zkey] [circuit.zkey.json]",
@@ -540,10 +579,9 @@ async function zkeyExportJson(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const zKey = await zkey.exportJson(zkeyName, logger);
+    const zKeyJson = await zkey.exportJson(zkeyName, logger);
 
-    const S = JSON.stringify(utils.stringifyBigInts(zKey), null, 1);
-    await fs.promises.writeFile(zkeyJsonName, S);
+    await bfj.write(zkeyJsonName, zKeyJson, {space: 1});
 }
 
 async function fileExists(file) {
@@ -551,6 +589,7 @@ async function fileExists(file) {
         .then(() => true)
         .catch(() => false);
 }
+
 // solidity genverifier [circuit_final.zkey] [verifier.sol]
 async function zkeyExportSolidityVerifier(params, options) {
     let zkeyName;
@@ -574,12 +613,14 @@ async function zkeyExportSolidityVerifier(params, options) {
 
     if (await fileExists(path.join(__dirname, "templates"))) {
         templates.groth16 = await fs.promises.readFile(path.join(__dirname, "templates", "verifier_groth16.sol.ejs"), "utf8");
-        templates.plonk = await fs.promises.readFile(path.join(__dirname, "templates", "verifier_plonk.sol.ejs"), "utf8");    
+        templates.plonk = await fs.promises.readFile(path.join(__dirname, "templates", "verifier_plonk.sol.ejs"), "utf8");
+        templates.fflonk = await fs.promises.readFile(path.join(__dirname, "templates", "verifier_fflonk.sol.ejs"), "utf8");
     } else {
         templates.groth16 = await fs.promises.readFile(path.join(__dirname, "..", "templates", "verifier_groth16.sol.ejs"), "utf8");
-        templates.plonk = await fs.promises.readFile(path.join(__dirname, "..", "templates", "verifier_plonk.sol.ejs"), "utf8");    
+        templates.plonk = await fs.promises.readFile(path.join(__dirname, "..", "templates", "verifier_plonk.sol.ejs"), "utf8");
+        templates.fflonk = await fs.promises.readFile(path.join(__dirname, "..", "templates", "verifier_fflonk.sol.ejs"), "utf8");
     }
-    
+
     const verifierCode = await zkey.exportSolidityVerifier(zkeyName, templates, logger);
 
     fs.writeFileSync(verifierName, verifierCode, "utf-8");
@@ -607,14 +648,16 @@ async function zkeyExportSolidityCalldata(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const pub = unstringifyBigInts(JSON.parse(fs.readFileSync(publicName, "utf8")));
-    const proof = unstringifyBigInts(JSON.parse(fs.readFileSync(proofName, "utf8")));
+    const pub = JSON.parse(fs.readFileSync(publicName, "utf8"));
+    const proof = JSON.parse(fs.readFileSync(proofName, "utf8"));
 
     let res;
     if (proof.protocol == "groth16") {
         res = await groth16.exportSolidityCallData(proof, pub);
     } else if (proof.protocol == "plonk") {
         res = await plonk.exportSolidityCallData(proof, pub);
+    } else if (proof.protocol === "fflonk") {
+        res = await fflonkCmd.fflonkExportCallDataCmd(pub, proof, logger);
     } else {
         throw new Error("Invalid Protocol");
     }
@@ -632,7 +675,7 @@ async function powersOfTauNew(params, options) {
     curveName = params[0];
 
     power = parseInt(params[1]);
-    if ((power<1) || (power>28)) {
+    if ((power<1) || (power>28) || isNaN(power)) {
         throw new Error("Power must be between 1 and 28");
     }
 
@@ -739,7 +782,7 @@ async function powersOfTauBeacon(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    return await powersOfTau.beacon(oldPtauName, newPtauName, options.name ,beaconHashStr, numIterationsExp, logger);
+    return await powersOfTau.beacon(oldPtauName, newPtauName, options.name, beaconHashStr, numIterationsExp, logger);
 }
 
 async function powersOfTauContribute(params, options) {
@@ -751,7 +794,7 @@ async function powersOfTauContribute(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    return await powersOfTau.contribute(oldPtauName, newPtauName, options.name , options.entropy, logger);
+    return await powersOfTau.contribute(oldPtauName, newPtauName, options.name, options.entropy, logger);
 }
 
 async function powersOfTauPreparePhase2(params, options) {
@@ -785,9 +828,9 @@ async function powersOfTauTruncate(params, options) {
     ptauName = params[0];
 
     let template = ptauName;
-    while ((template.length>0) && (template[template.length-1] != ".")) template = template.slice(0, template.length-1);
-    template = template.slice(0, template.length-1);
-    template = template+"_";
+    while ((template.length > 0) && (template[template.length - 1] != ".")) template = template.slice(0, template.length - 1);
+    template = template.slice(0, template.length - 1);
+    template = template + "_";
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
@@ -804,11 +847,9 @@ async function powersOfTauExportJson(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const pTau = await powersOfTau.exportJson(ptauName, logger);
+    const pTauJson = await powersOfTau.exportJson(ptauName, logger);
 
-    const S = JSON.stringify(stringifyBigInts(pTau), null, 1);
-    await fs.promises.writeFile(jsonName, S);
-
+    await bfj.write(jsonName, pTauJson, {space: 1});
 }
 
 
@@ -873,7 +914,12 @@ async function zkeyImportBellman(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    return zkey.importBellman(zkeyNameOld, mpcParamsName, zkeyNameNew, options.name, logger);
+    const isValid = await zkey.importBellman(zkeyNameOld, mpcParamsName, zkeyNameNew, options.name, logger);
+    if (isValid) {
+        return 0;
+    } else {
+        return 1;
+    }
 }
 
 // phase2 verify r1cs [circuit.r1cs] [powersoftau.ptau] [circuit_final.zkey]
@@ -972,7 +1018,7 @@ async function zkeyBeacon(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    return await zkey.beacon(zkeyOldName, zkeyNewName, options.name ,beaconHashStr, numIterationsExp, logger);
+    return await zkey.beacon(zkeyOldName, zkeyNewName, options.name, beaconHashStr, numIterationsExp, logger);
 }
 
 
@@ -1039,8 +1085,8 @@ async function plonkProve(params, options) {
 
     const {proof, publicSignals} = await plonk.prove(zkeyName, witnessName, logger);
 
-    await fs.promises.writeFile(proofName, JSON.stringify(stringifyBigInts(proof), null, 1), "utf-8");
-    await fs.promises.writeFile(publicName, JSON.stringify(stringifyBigInts(publicSignals), null, 1), "utf-8");
+    await bfj.write(proofName, stringifyBigInts(proof), {space: 1});
+    await bfj.write(publicName, stringifyBigInts(publicSignals), {space: 1});
 
     return 0;
 }
@@ -1057,12 +1103,12 @@ async function plonkFullProve(params, options) {
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
-    const input = unstringifyBigInts(JSON.parse(await fs.promises.readFile(inputName, "utf8")));
+    const input = JSON.parse(await fs.promises.readFile(inputName, "utf8"));
 
-    const {proof, publicSignals} = await plonk.fullProve(input, wasmName, zkeyName,  logger);
+    const {proof, publicSignals} = await plonk.fullProve(input, wasmName, zkeyName, logger);
 
-    await fs.promises.writeFile(proofName, JSON.stringify(stringifyBigInts(proof), null, 1), "utf-8");
-    await fs.promises.writeFile(publicName, JSON.stringify(stringifyBigInts(publicSignals), null, 1), "utf-8");
+    await bfj.write(proofName, stringifyBigInts(proof), {space: 1});
+    await bfj.write(publicName, stringifyBigInts(publicSignals), {space: 1});
 
     return 0;
 }
@@ -1075,9 +1121,9 @@ async function plonkVerify(params, options) {
     const publicName = params[1] || "public.json";
     const proofName = params[2] || "proof.json";
 
-    const verificationKey = unstringifyBigInts(JSON.parse(fs.readFileSync(verificationKeyName, "utf8")));
-    const pub = unstringifyBigInts(JSON.parse(fs.readFileSync(publicName, "utf8")));
-    const proof = unstringifyBigInts(JSON.parse(fs.readFileSync(proofName, "utf8")));
+    const verificationKey = JSON.parse(fs.readFileSync(verificationKeyName, "utf8"));
+    const pub = JSON.parse(fs.readFileSync(publicName, "utf8"));
+    const proof = JSON.parse(fs.readFileSync(proofName, "utf8"));
 
     if (options.verbose) Logger.setLogLevel("DEBUG");
 
@@ -1087,5 +1133,101 @@ async function plonkVerify(params, options) {
         return 0;
     } else {
         return 1;
+    }
+}
+
+async function fflonkSetup(params, options) {
+    const r1csFilename = params[0] || "circuit.r1cs";
+    const ptauFilename = params[1] || "powersoftau.ptau";
+    const zkeyFilename = params[2] || "circuit.zkey";
+
+    if (options.verbose) Logger.setLogLevel("DEBUG");
+
+    return await fflonkCmd.fflonkSetupCmd(r1csFilename, ptauFilename, zkeyFilename, logger);
+}
+
+
+async function fflonkProve(params, options) {
+    const zkeyFilename = params[0] || "circuit.zkey";
+    const witnessFilename = params[1] || "witness.wtns";
+    const proofFilename = params[2] || "proof.json";
+    const publicInputsFilename = params[3] || "public.json";
+
+    if (options.verbose) Logger.setLogLevel("DEBUG");
+
+    return await fflonkCmd.fflonkProveCmd(zkeyFilename, witnessFilename, publicInputsFilename, proofFilename, logger);
+}
+
+async function fflonkFullProve(params, options) {
+
+    const witnessInputsFilename = params[0] || "witness.json";
+    const wasmFilename = params[1] || "circuit.wasm";
+    const zkeyFilename = params[2] || "circuit.zkey";
+    const proofFilename = params[3] || "proof.json";
+    const publicInputsFilename = params[4] || "public.json";
+
+    if (options.verbose) Logger.setLogLevel("DEBUG");
+
+    return await fflonkCmd.fflonkFullProveCmd(zkeyFilename, witnessInputsFilename, wasmFilename, publicInputsFilename, proofFilename, logger);
+}
+
+async function fflonkVerify(params, options) {
+    const vkeyFilename = params[0] || "circuit.vkey";
+    const publicInputsFilename = params[1] || "public.json";
+    const proofFilename = params[2] || "proof.json";
+
+    if (options.verbose) Logger.setLogLevel("DEBUG");
+
+    const isValid = await fflonkCmd.fflonkVerifyCmd(vkeyFilename, publicInputsFilename, proofFilename, logger);
+
+    return isValid ? 0 : 1;
+}
+
+async function fileInfo(params) {
+    const filename = params[0];
+    const extension = filename.split(".").pop();
+
+    if (!["zkey", "r1cs", "ptau", "wtns"].includes(extension)) {
+        console.error(`Extension ${extension} is not allowed.`);
+        return;
+    }
+
+    try {
+        const {
+            fd: fd,
+            sections: sections
+        } = await binFileUtils.readBinFile(filename, extension, 2, 1 << 25, 1 << 23);
+
+        console.log(`File info for    ${filename}`);
+        console.log();
+        console.log(`File size:       ${fd.totalSize} bytes`);
+        console.log(`File type:       ${extension}`);
+        console.log(`Version:         ${fd.version}`);
+        console.log(`Bin version:     ${fd.binVersion}`);
+        console.log("");
+
+        sections.forEach((section, index) => {
+            let errors = [];
+            if (section.length > 1) errors.push(`Section ${index} has more than one section definition`);
+            else {
+                if (section[0].size === 0) {
+                    errors.push(`Section ${index} size is zero. This could cause false errors in other sections.`);
+                }
+            }
+            if (section[0].p + section[0].size > fd.totalSize) {
+                errors.push(`Section ${index} is out of bounds of the file.`);
+            }
+
+            const color = errors.length === 0 ? "%s%s%s" : "%s\x1b[31m%s\x1b[0m%s";
+            const text0 = "section " + ("#" + index).padStart(5, " ");
+            const text1 = errors.length === 0 ? "   " : " !!";
+            const text2 = ` size: ${section[0].size}\toffset: 0x${(section[0].p - 12).toString(16)}`;
+            console.log(color, text0, text1, text2);
+            errors.forEach((error) => {
+                console.error("\x1b[31m%s\x1b[0m", "                 > " + error);
+            });
+        });
+    } catch (error) {
+        console.error(error.message);
     }
 }
